@@ -52,8 +52,10 @@ Contacts account types and contact MIME handlers use the fork's identity too;
 providers already derive their authorities from the application ID. Official-only
 passkey support is disabled for the custom application ID.
 
-The checked-in dummy Firebase configurations have matching fork package names so
-the debug build still compiles. They remain placeholders: register your own
+Application modules use dummy Firebase clients with matching fork application IDs.
+The shared `TMessagesProj` library keeps its original `org.telegram.messenger`
+Firebase client because its Google Services task uses the library namespace,
+not the APK application ID. CI checks both mappings before native compilation. They remain placeholders: register your own
 Firebase Android application and replace `google-services.json` for working
 Firebase push services.
 

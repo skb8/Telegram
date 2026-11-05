@@ -54,6 +54,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Check Firebase package mapping
+        run: python3 tools/ci/check_google_services.py
       - name: Fetch native and media submodules
         run: git submodule update --init --recursive --depth=1
       - uses: actions/setup-java@v4
