@@ -2464,6 +2464,14 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                 sessionButton.setRound();
                 sessionButton.setText(getString(R.string.SessionTransferLogin), false);
                 sessionButton.setOnClickListener(v -> {
+                    // Stop automatic passkey login before opening another authentication flow.
+                    passkeyRequestGeneration++;
+                    requestedPasskey = true;
+                    requestingPasskey = false;
+                    if (cancelRequestingPasskey != null) {
+                        cancelRequestingPasskey.run();
+                        cancelRequestingPasskey = null;
+                    }
                     if (sessionTransfer == null) {
                         sessionTransfer = new org.telegram.messenger.sessions.SessionTransfer(LoginActivity.this, user -> {
                             TLRPC.TL_auth_authorization authorization = new TLRPC.TL_auth_authorization();
@@ -3429,6 +3437,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
             }
         }
 
+        private int passkeyRequestGeneration;
         private boolean requestedPasskey = false;
         private boolean requestingPasskey = false;
         private Runnable cancelRequestingPasskey;
@@ -3439,7 +3448,9 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
 
             requestingPasskey = true;
             requestedPasskey = true;
+            final int passkeyGeneration = ++passkeyRequestGeneration;
             cancelRequestingPasskey = PasskeysController.login(getContext(), currentAccount, clickedButton, (userId, authObject, err) -> {
+                if (passkeyGeneration != passkeyRequestGeneration) return;
                 cancelRequestingPasskey = null;
                 requestingPasskey = false;
                 if (err != null && ("EMPTY".equals(err) || "CANCELLED".equals(err))) {
@@ -3469,6 +3480,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                 if (err != null && err.contains("SESSION_PASSWORD_NEEDED")) {
                     final TL_account.getPassword req2 = new TL_account.getPassword();
                     ConnectionsManager.getInstance(currentAccount).sendRequest(req2, (response1, error1) -> AndroidUtilities.runOnUIThread(() -> {
+                        if (passkeyGeneration != passkeyRequestGeneration) return;
                         nextPressed = false;
                         showDoneButton(false, true);
                         if (error1 == null) {
