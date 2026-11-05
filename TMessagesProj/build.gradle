@@ -135,6 +135,10 @@ android {
     }
 
     defaultConfig {
+        // Optional CI target; normal builds retain the upstream ABI selection.
+        if (project.hasProperty('SESSION_BUILD_ABI')) {
+            ndk { abiFilters project.property('SESSION_BUILD_ABI').toString() }
+        }
         minSdkVersion 23
         targetSdkVersion 36
 

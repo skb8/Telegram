@@ -1,0 +1,78 @@
+name: Session portability
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      abi:
+        description: APK architecture
+        type: choice
+        default: arm64-v8a
+        options: [arm64-v8a, armeabi-v7a, x86_64, universal]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: session-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codecs:
+    name: Session format interoperability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install cryptography==50.0.2
+      - run: bash tests/sessions/run.sh
+
+  apk:
+    name: Android APK
+    needs: codecs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch native and media submodules
+        run: git submodule update --init --recursive --depth=1
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android build tools
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018' 'cmake;3.22.1'
+      - name: Configure optional Telegram API credentials
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: python3 tools/ci/configure_api.py
+      - name: Build standalone debug APK
+        env:
+          APK_ABI: ${{ inputs.abi || 'arm64-v8a' }}
+        run: |
+          abi_args=()
+          if [ "$APK_ABI" != universal ]; then
+            abi_args+=("-PSESSION_BUILD_ABI=$APK_ABI")
+          fi
+          bash gradlew :TMessagesProj_AppStandalone:assembleAfatDebug "${abi_args[@]}" --no-daemon --max-workers=2 -Dorg.gradle.jvmargs=-Xmx5g
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Telegram-session-debug-${{ inputs.abi || 'arm64-v8a' }}
+          path: TMessagesProj_AppStandalone/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 7
