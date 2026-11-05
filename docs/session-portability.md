@@ -43,14 +43,34 @@ export is exposed; exported copies then stop working too. Credential values are
 not logged or automatically copied to the clipboard/uploaded. Temporary SQLite
 files use private app cache and are removed after the operation.
 
+## Application identity
+
+The application ID is `org.skb8.telegram`. Standalone debug/release APKs use that
+exact ID (without the original `.web` suffix), so they install separately from
+official Telegram. Java/JNI namespaces remain `org.telegram` for compatibility.
+Contacts account types and contact MIME handlers use the fork's identity too;
+providers already derive their authorities from the application ID. Official-only
+passkey support is disabled for the custom application ID.
+
+The checked-in dummy Firebase configurations have matching fork package names so
+the debug build still compiles. They remain placeholders: register your own
+Firebase Android application and replace `google-services.json` for working
+Firebase push services.
+
 ## GitHub Actions
 
-`Session portability` runs on pushes to master, PRs and manual dispatch. It runs
+`Build Debug` runs on pushes to master, PRs and manual dispatch. It runs
 format interoperability checks and builds a standalone debug APK. Push builds
 produce arm64-v8a; manual dispatch also offers armeabi-v7a, x86_64 and universal.
 Download `Telegram-session-debug-<architecture>` from the workflow's artifacts.
 The debug build uses the upstream dummy signing key and Firebase configuration.
 Release signing and branding retain the upstream configuration.
+
+The workflow caches Gradle dependencies/wrapper and local build-cache results with
+`gradle/actions/setup-gradle`. Native C/C++ compilation uses a persistent 2 GiB
+ccache, partitioned by OS, NDK and target ABI; ccache validates individual compiler
+inputs. Python test dependencies use the pip cache. The first run fills the caches;
+subsequent builds can reuse them. PR jobs treat the Gradle cache as read-only.
 
 Compilation does not require your Telegram API credentials. To use your own API
 application, add **both** repository Actions secrets:

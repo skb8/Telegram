@@ -1,4 +1,4 @@
-name: Session portability
+name: Build Debug
 
 on:
   push:
@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: session-build-${{ github.ref }}
+  group: build-debug-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -35,7 +35,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install cryptography==50.0.2
+          cache: pip
+          cache-dependency-path: tests/sessions/requirements.txt
+      - run: python -m pip install -r tests/sessions/requirements.txt
       - run: bash tests/sessions/run.sh
 
   apk:
@@ -43,6 +45,11 @@ jobs:
     needs: codecs
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 2G
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,6 +60,24 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Restore native compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-ccache-v1-ndk27.2.12479018-${{ inputs.abi || 'arm64-v8a' }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-v1-ndk27.2.12479018-${{ inputs.abi || 'arm64-v8a' }}-
+      - name: Set up native compiler cache
+        run: |
+          if ! command -v ccache >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends ccache
+          fi
+          ccache --max-size=2G
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
@@ -66,12 +91,22 @@ jobs:
       - name: Build standalone debug APK
         env:
           APK_ABI: ${{ inputs.abi || 'arm64-v8a' }}
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
         run: |
           abi_args=()
           if [ "$APK_ABI" != universal ]; then
             abi_args+=("-PSESSION_BUILD_ABI=$APK_ABI")
           fi
-          bash gradlew :TMessagesProj_AppStandalone:assembleAfatDebug "${abi_args[@]}" --no-daemon --max-workers=2 -Dorg.gradle.jvmargs=-Xmx5g
+          bash gradlew :TMessagesProj_AppStandalone:assembleAfatDebug "${abi_args[@]}" --build-cache --no-daemon --max-workers=2 -Dorg.gradle.jvmargs=-Xmx5g
+      - name: Verify APK package
+        run: python3 tools/ci/verify_apk.py
+      - name: Native compiler cache statistics
+        if: always()
+        run: |
+          if command -v ccache >/dev/null; then
+            ccache --show-stats
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: Telegram-session-debug-${{ inputs.abi || 'arm64-v8a' }}
