@@ -77,6 +77,7 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.view.animation.AccelerateDecelerateInterpolator;
 import android.view.animation.Animation;
 import android.view.animation.AnimationUtils;
@@ -120,6 +121,11 @@ import org.json.JSONException;
 import org.json.JSONObject;
 import org.telegram.PhoneFormat.PhoneFormat;
 import org.telegram.messenger.AccountInstance;
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.WriterException;
+import com.google.zxing.common.BitMatrix;
+import com.google.zxing.qrcode.QRCodeWriter;
+
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.AuthTokensHelper;
@@ -2460,18 +2466,21 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
             });
 
             if (activityMode == MODE_LOGIN) {
+                LinearLayout loginOptions = new LinearLayout(context);
+                addView(loginOptions, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 46, 16, 16, 16, 8));
+
+                ButtonWithCounterView qrButton = new ButtonWithCounterView(context, getResourceProvider());
+                qrButton.setRound();
+                qrButton.setText(getString(R.string.QrLoginButton), false);
+                qrButton.setOnClickListener(v -> showQrLogin());
+                loginOptions.addView(qrButton, LayoutHelper.createLinear(0, LayoutHelper.MATCH_PARENT, 1f));
+
                 ButtonWithCounterView sessionButton = new ButtonWithCounterView(context, getResourceProvider());
                 sessionButton.setRound();
                 sessionButton.setText(getString(R.string.SessionTransferLogin), false);
                 sessionButton.setOnClickListener(v -> {
-                    // Stop automatic passkey login before opening another authentication flow.
-                    passkeyRequestGeneration++;
-                    requestedPasskey = true;
-                    requestingPasskey = false;
-                    if (cancelRequestingPasskey != null) {
-                        cancelRequestingPasskey.run();
-                        cancelRequestingPasskey = null;
-                    }
+                    if (nextPressed || isRequestingFirebaseSms) return;
+                    stopPasskeyLogin();
                     if (sessionTransfer == null) {
                         sessionTransfer = new org.telegram.messenger.sessions.SessionTransfer(LoginActivity.this, user -> {
                             TLRPC.TL_auth_authorization authorization = new TLRPC.TL_auth_authorization();
@@ -2481,7 +2490,9 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                     }
                     sessionTransfer.showImport();
                 });
-                addView(sessionButton, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 46, 16, 16, 16, 8));
+                LinearLayout.LayoutParams sessionParams = LayoutHelper.createLinear(0, LayoutHelper.MATCH_PARENT, 1f);
+                sessionParams.setMarginStart(dp(8));
+                loginOptions.addView(sessionButton, sessionParams);
             }
 
             int bottomMargin = activityMode == MODE_LOGIN ? 2 : 72;
@@ -3429,20 +3440,225 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
         }
 
         @Override
+        public void onHide() {
+            super.onHide();
+            finishQrLogin(false);
+        }
+
+        @Override
         public void onDestroyActivity() {
             super.onDestroyActivity();
-            if (cancelRequestingPasskey != null) {
-                cancelRequestingPasskey.run();
-                cancelRequestingPasskey = null;
-            }
+            finishQrLogin(false);
+            stopPasskeyLogin();
         }
 
         private int passkeyRequestGeneration;
         private boolean requestedPasskey = false;
         private boolean requestingPasskey = false;
         private Runnable cancelRequestingPasskey;
+
+        private void stopPasskeyLogin() {
+            passkeyRequestGeneration++;
+            requestedPasskey = true;
+            requestingPasskey = false;
+            if (cancelRequestingPasskey != null) {
+                cancelRequestingPasskey.run();
+                cancelRequestingPasskey = null;
+            }
+        }
+
+        private AlertDialog qrLoginDialog;
+        private ImageView qrLoginImage;
+        private int qrLoginRequestId;
+        private boolean qrLoginUpdatePending;
+        private final Runnable qrLoginRefresh = this::refreshQrLogin;
+        private final Runnable qrLoginTimeout = () -> failQrLogin(null);
+
+        private void showQrLogin() {
+            Activity activity = getParentActivity();
+            if (activity == null || qrLoginDialog != null || nextPressed || isRequestingFirebaseSms
+                    || getUserConfig().isClientActivated() || sessionTransfer != null && sessionTransfer.isBusy()) {
+                return;
+            }
+
+            stopPasskeyLogin();
+            AndroidUtilities.hideKeyboard(phoneField);
+
+            FrameLayout code = new FrameLayout(activity);
+            code.addView(new RadialProgressView(activity, getResourceProvider()),
+                    LayoutHelper.createFrame(40, 40, Gravity.CENTER));
+            qrLoginImage = new ImageView(activity);
+            qrLoginImage.setVisibility(View.INVISIBLE);
+            qrLoginImage.setContentDescription(getString(R.string.QrLoginButton));
+            code.addView(qrLoginImage, LayoutHelper.createFrame(200, 200, Gravity.CENTER));
+            LinearLayout content = new LinearLayout(activity);
+            content.setOrientation(LinearLayout.VERTICAL);
+            content.addView(code, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 216));
+
+            AlertDialog dialog = new AlertDialog.Builder(activity, getResourceProvider())
+                    .setTitle(getString(R.string.QrLoginButton))
+                    .setMessage(getString(R.string.QrLoginInstructions))
+                    .setView(content)
+                    .setNegativeButton(getString(R.string.Cancel), null)
+                    .create();
+            qrLoginDialog = dialog;
+            if (showDialog(dialog, dismissed -> {
+                if (qrLoginDialog == dialog) finishQrLogin(false);
+            }) == null) {
+                qrLoginDialog = null;
+                qrLoginImage = null;
+                return;
+            }
+            if (dialog.getWindow() != null) {
+                dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+            }
+            getNotificationCenter().addObserver(this, NotificationCenter.onUpdateLoginToken);
+            refreshQrLogin();
+        }
+
+        private void refreshQrLogin() {
+            if (qrLoginDialog == null) return;
+            if (qrLoginRequestId != 0) {
+                qrLoginUpdatePending = true;
+                return;
+            }
+
+            AndroidUtilities.cancelRunOnUIThread(qrLoginRefresh);
+            clearQrLoginImage();
+            TLRPC.TL_auth_exportLoginToken request = new TLRPC.TL_auth_exportLoginToken();
+            request.api_id = BuildVars.APP_ID;
+            request.api_hash = BuildVars.APP_HASH;
+            for (int account = 0; account < UserConfig.MAX_ACCOUNT_COUNT; account++) {
+                UserConfig config = UserConfig.getInstance(account);
+                if (config.isClientActivated()) request.except_ids.add(config.getClientUserId());
+            }
+            sendQrLoginRequest(request);
+        }
+
+        private void sendQrLoginRequest(TLObject request) {
+            AlertDialog dialog = qrLoginDialog;
+            qrLoginRequestId = getConnectionsManager().sendRequest(request, (response, error) ->
+                    AndroidUtilities.runOnUIThread(() -> {
+                        if (qrLoginDialog != dialog) return;
+                        qrLoginRequestId = 0;
+                        AndroidUtilities.cancelRunOnUIThread(qrLoginTimeout);
+                        handleQrLoginResponse(request, response, error);
+                    }), ConnectionsManager.RequestFlagWithoutLogin | ConnectionsManager.RequestFlagEnableUnauthorized
+                    | ConnectionsManager.RequestFlagFailOnServerErrors);
+            AndroidUtilities.runOnUIThread(qrLoginTimeout, 30000);
+        }
+
+        private void handleQrLoginResponse(TLObject request, TLObject response, TLRPC.TL_error error) {
+            if (error != null) {
+                if (!(request instanceof TL_account.getPassword) && "SESSION_PASSWORD_NEEDED".equals(error.text)) {
+                    clearQrLoginImage();
+                    sendQrLoginRequest(new TL_account.getPassword());
+                } else {
+                    failQrLogin(error);
+                }
+                return;
+            }
+            if (response instanceof TLRPC.TL_auth_loginToken) {
+                TLRPC.TL_auth_loginToken token = (TLRPC.TL_auth_loginToken) response;
+                if (qrLoginUpdatePending) {
+                    qrLoginUpdatePending = false;
+                    refreshQrLogin();
+                    return;
+                }
+                long ttl = token.expires - (long) getConnectionsManager().getCurrentTime();
+                if (ttl > 0) {
+                    try {
+                        qrLoginImage.setImageBitmap(createLoginQrBitmap(token.token));
+                        qrLoginImage.setVisibility(View.VISIBLE);
+                    } catch (WriterException e) {
+                        failQrLogin(null);
+                        return;
+                    }
+                } else {
+                    clearQrLoginImage();
+                }
+                AndroidUtilities.runOnUIThread(qrLoginRefresh, Math.max(1000L, ttl * 1000L));
+            } else if (response instanceof TLRPC.TL_auth_loginTokenMigrateTo && request instanceof TLRPC.TL_auth_exportLoginToken) {
+                TLRPC.TL_auth_loginTokenMigrateTo migration = (TLRPC.TL_auth_loginTokenMigrateTo) response;
+                clearQrLoginImage();
+                getConnectionsManager().setDefaultDatacenterId(migration.dc_id);
+                TLRPC.TL_auth_importLoginToken importToken = new TLRPC.TL_auth_importLoginToken();
+                importToken.token = migration.token;
+                sendQrLoginRequest(importToken);
+            } else if (response instanceof TLRPC.TL_auth_loginTokenSuccess
+                    && ((TLRPC.TL_auth_loginTokenSuccess) response).authorization instanceof TLRPC.TL_auth_authorization) {
+                finishQrLogin(true);
+                onAuthSuccess((TLRPC.TL_auth_authorization) ((TLRPC.TL_auth_loginTokenSuccess) response).authorization);
+            } else if (request instanceof TL_account.getPassword && response instanceof TL_account.Password) {
+                TL_account.Password password = (TL_account.Password) response;
+                if (!TwoStepVerificationActivity.canHandleCurrentPassword(password, true)) {
+                    finishQrLogin(false);
+                    AlertsCreator.showUpdateAppAlert(getParentActivity(), getString(R.string.UpdateAppAlert), true);
+                    return;
+                }
+                finishQrLogin(true);
+                showLoginPassword(password);
+            } else {
+                failQrLogin(null);
+            }
+        }
+
+        private Bitmap createLoginQrBitmap(byte[] token) throws WriterException {
+            String link = "tg://login?token=" + Base64.encodeToString(token, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+            int size = dp(200);
+            BitMatrix matrix = new QRCodeWriter().encode(link, BarcodeFormat.QR_CODE, size, size);
+            int width = matrix.getWidth();
+            int height = matrix.getHeight();
+            int[] pixels = new int[width * height];
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    pixels[y * width + x] = matrix.get(x, y) ? Color.BLACK : Color.WHITE;
+                }
+            }
+            return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888);
+        }
+
+        private void clearQrLoginImage() {
+            qrLoginImage.setImageDrawable(null);
+            qrLoginImage.setVisibility(View.INVISIBLE);
+        }
+
+        private void failQrLogin(TLRPC.TL_error error) {
+            finishQrLogin(false);
+            needShowAlert(getString(R.string.QrLoginButton), error != null && error.text != null && error.text.startsWith("FLOOD_WAIT")
+                    ? getString(R.string.FloodWait) : getString(R.string.QrLoginError));
+        }
+
+        private void finishQrLogin(boolean keepAuthorization) {
+            AlertDialog dialog = qrLoginDialog;
+            if (dialog == null) return;
+            qrLoginDialog = null;
+            AndroidUtilities.cancelRunOnUIThread(qrLoginRefresh);
+            AndroidUtilities.cancelRunOnUIThread(qrLoginTimeout);
+            getNotificationCenter().removeObserver(this, NotificationCenter.onUpdateLoginToken);
+            if (qrLoginRequestId != 0) {
+                getConnectionsManager().cancelRequest(qrLoginRequestId, true);
+                qrLoginRequestId = 0;
+            }
+            qrLoginUpdatePending = false;
+            clearQrLoginImage();
+            qrLoginImage = null;
+            if (!keepAuthorization && !getUserConfig().isClientActivated()) {
+                getConnectionsManager().cleanup(true);
+            }
+            dialog.dismiss();
+        }
+
+        private void showLoginPassword(TL_account.Password password) {
+            Bundle bundle = new Bundle();
+            SerializedData data = new SerializedData(password.getObjectSize());
+            password.serializeToStream(data);
+            bundle.putString("password", Utilities.bytesToHex(data.toByteArray()));
+            setPage(VIEW_PASSWORD, true, bundle, false);
+        }
+
         private void requestPasskey(boolean clickedButton) {
-            if (activityMode != MODE_LOGIN) return;
+            if (activityMode != MODE_LOGIN || qrLoginDialog != null) return;
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || !BuildVars.SUPPORTS_PASSKEYS) return;
             if (requestingPasskey || !clickedButton && requestedPasskey) return;
 
@@ -3489,11 +3705,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                                 AlertsCreator.showUpdateAppAlert(getParentActivity(), getString("UpdateAppAlert", R.string.UpdateAppAlert), true);
                                 return;
                             }
-                            final Bundle bundle = new Bundle();
-                            final SerializedData data = new SerializedData(password.getObjectSize());
-                            password.serializeToStream(data);
-                            bundle.putString("password", Utilities.bytesToHex(data.toByteArray()));
-                            setPage(VIEW_PASSWORD, true, bundle, false);
+                            showLoginPassword(password);
                         } else {
                             needShowAlert(getString(R.string.RestorePasswordNoEmailTitle), error1.text);
                         }
@@ -3542,6 +3754,8 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
         public void didReceivedNotification(int id, int account, Object... args) {
             if (id == NotificationCenter.emojiLoaded) {
                 countryButton.getCurrentView().invalidate();
+            } else if (id == NotificationCenter.onUpdateLoginToken && account == currentAccount) {
+                refreshQrLogin();
             }
         }
     }

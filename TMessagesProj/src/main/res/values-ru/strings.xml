@@ -265,6 +265,9 @@
     <string name="RemindDayYearAt">\'Напомнить\' d MMM yyyy \'в\' HH:mm</string>
     <!-- Account session import/export -->
     <string name="SessionTransferButton">Сессия</string>
+    <string name="QrLoginButton">Войти по QR</string>
+    <string name="QrLoginInstructions">На устройстве, где вы уже вошли в аккаунт, откройте «Настройки → Устройства → Подключить устройство» и отсканируйте этот код.</string>
+    <string name="QrLoginError">Не удалось войти по QR. Попробуйте ещё раз.</string>
     <string name="SessionTransferLogin">Войти через сессию</string>
     <string name="SessionTransferFile">Файл Telethon / Pyrogram (.session)</string>
     <string name="SessionTransferTdata">Архив tdata (.zip)</string>

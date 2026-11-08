@@ -11632,6 +11632,9 @@
     <string name="NoPaidMessagesTokenImported">You can now message **%1$s** for free.</string>
     <!-- Account session import/export -->
     <string name="SessionTransferButton">Session</string>
+    <string name="QrLoginButton">Log in by QR</string>
+    <string name="QrLoginInstructions">On a device where you are already logged in, open Settings → Devices → Link Desktop Device and scan this code.</string>
+    <string name="QrLoginError">Could not complete QR login. Please try again.</string>
     <string name="SessionTransferLogin">Log in with a session</string>
     <string name="SessionTransferFile">Telethon / Pyrogram file (.session)</string>
     <string name="SessionTransferTdata">tdata archive (.zip)</string>
