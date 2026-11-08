@@ -107,7 +107,7 @@ android {
             ndk {
                 if (project.hasProperty('SESSION_BUILD_ABI')) {
                     abiFilters project.property('SESSION_BUILD_ABI').toString()
-                } else {
+                } else if (System.getenv('RELEASE_SPLIT_APKS') != 'true') {
                     abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
                 }
             }
@@ -122,9 +122,19 @@ android {
 
     defaultConfig.versionCode = Integer.parseInt(APP_VERSION_CODE)
 
+    splits {
+        abi {
+            enable System.getenv('RELEASE_SPLIT_APKS') == 'true'
+            reset()
+            include 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+            universalApk true
+        }
+    }
+
     applicationVariants.all { variant ->
         variant.outputs.all { output ->
-            outputFileName = "app.apk"
+            def abi = output.getFilter(com.android.build.OutputFile.ABI)
+            outputFileName = System.getenv('RELEASE_SPLIT_APKS') == 'true' ? "app-${abi ?: 'universal'}.apk" : "app.apk"
             output.versionCodeOverride = defaultConfig.versionCode * 10 + variant.productFlavors.get(0).abiVersionCode
         }
     }

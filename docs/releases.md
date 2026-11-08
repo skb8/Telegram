@@ -2,7 +2,7 @@
 
 Push a tag matching `APP_VERSION_NAME` in `gradle.properties`, for example
 `git tag 13.1.1 && git push origin 13.1.1`. The Release workflow builds a signed,
-non-debuggable universal APK for all four supported ABIs and publishes it only
+non-debuggable APK for each of the four supported ABIs plus a universal APK, and publishes them only
 after session interoperability and APK identity/signature checks pass.
 To retry a failed release, rerun the workflow or dispatch it against the tag.
 Published releases are never overwritten by a rerun.
@@ -29,7 +29,7 @@ Public signing certificate SHA-256:
 08d095d1b0be544b15f99eccb87b3a0199116db2966bf96a602b206ae475604e
 ```
 
-The APK, `SHA256SUMS`, and `release-certificate.pem` are attached to each release.
+The five APKs, `SHA256SUMS`, and `release-certificate.pem` are attached to each release.
 Verify the downloaded files with `sha256sum --check SHA256SUMS`; verify the APK
 signature using Android SDK `apksigner verify --verbose --print-certs <apk>`
 and compare the certificate fingerprint above.
