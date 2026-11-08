@@ -126,6 +126,10 @@ public class FileLog {
         if (!BuildVars.DEBUG_PRIVATE_VERSION || !BuildVars.LOGS_ENABLED || request == null) {
             return;
         }
+        // QR login RPCs carry application credentials and temporary login tokens.
+        if (request instanceof TLRPC.TL_auth_exportLoginToken || request instanceof TLRPC.TL_auth_importLoginToken) {
+            return;
+        }
         String requestSimpleName = request.getClass().getSimpleName();
         if (error == null && ("TL_upload_getFile".equals(requestSimpleName) || "TL_upload_getWebFile".equals(requestSimpleName))) {
             return;
