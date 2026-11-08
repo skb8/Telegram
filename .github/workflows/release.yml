@@ -1,0 +1,175 @@
+name: Release
+
+on:
+  push:
+    tags: ['*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  codecs:
+    name: Session format interoperability
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: tests/sessions/requirements.txt
+      - run: python -m pip install -r tests/sessions/requirements.txt
+      - run: bash tests/sessions/run.sh
+
+  build:
+    name: Signed universal release APK
+    needs: codecs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 2G
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require a version tag
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+        run: test "$REF_TYPE" = tag
+      - name: Check Firebase package mapping
+        run: python3 tools/ci/check_google_services.py
+      - name: Free space for four native architectures
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          df -h .
+      - name: Fetch native and media submodules
+        run: git submodule update --init --recursive --depth=1
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+      - name: Restore native compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-ccache-v1-ndk27.2.12479018-universal-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-v1-ndk27.2.12479018-universal-
+      - name: Set up native compiler cache
+        run: |
+          if ! command -v ccache >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends ccache
+          fi
+          ccache --max-size=2G
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install Android build tools
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018' 'cmake;3.22.1'
+      - name: Configure release signing and Telegram API credentials
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/release.keystore
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          RELEASE_CERT_SHA256: ${{ secrets.RELEASE_CERT_SHA256 }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          python3 tools/ci/prepare_release.py
+          python3 tools/ci/configure_api.py
+      - name: Build signed universal APK
+        env:
+          RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/release.keystore
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+        run: bash gradlew :TMessagesProj_AppStandalone:assembleAfatStandalone --build-cache --no-daemon --max-workers=2 -Dorg.gradle.jvmargs=-Xmx5g
+      - name: Verify and package release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_CERT_SHA256: ${{ secrets.RELEASE_CERT_SHA256 }}
+          RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/release.keystore
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+        run: |
+          python3 tools/ci/verify_release.py
+          mkdir -p dist
+          cp TMessagesProj_AppStandalone/build/outputs/apk/afat/standalone/app.apk "dist/Telegram-${RELEASE_TAG}-universal.apk"
+          keytool -exportcert -rfc -keystore "$RELEASE_KEYSTORE_PATH" -storepass:env RELEASE_STORE_PASSWORD -alias "$RELEASE_KEY_ALIAS" -file dist/release-certificate.pem
+          cd dist
+          sha256sum *.apk release-certificate.pem > SHA256SUMS
+      - name: Upload verified release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.ref_name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove private signing material
+        if: always()
+        run: rm -f "${{ runner.temp }}/release.keystore"
+      - name: Native compiler cache statistics
+        if: always()
+        run: |
+          if command -v ccache >/dev/null; then
+            ccache --show-stats
+          fi
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ github.ref_name }}
+          path: dist
+      - name: Publish verified APK and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS
+          printf 'Fork based on Telegram %s, package `org.skb8.telegram`.\n\n' "$RELEASE_TAG" > notes.md
+          cat >> notes.md <<'NOTES'
+          Universal release APK for arm64-v8a, armeabi-v7a, x86 and x86_64 (Android 6.0+).
+          Signed with this fork's release key. SHA256SUMS and the public signing certificate are attached.
+          NOTES
+          # An existing published release must never be overwritten by a rerun.
+          if gh release view "$RELEASE_TAG" --json isDraft > release.json 2>/dev/null; then
+            python3 -c 'import json; assert json.load(open("release.json"))["isDraft"], "Release is already published"'
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Telegram $RELEASE_TAG" --notes-file notes.md
+          fi
+          gh release upload "$RELEASE_TAG" ./*.apk SHA256SUMS release-certificate.pem --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest --title "Telegram $RELEASE_TAG" --notes-file notes.md
